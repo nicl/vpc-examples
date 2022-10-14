@@ -5,13 +5,20 @@ import upickle.default.{macroRW, read, ReadWriter => RW}
 
 // Prism models
 
+// We use case classes to model the JSON Prism response. JSON handling in Scala
+// is a bit of a pain because there is no 'standard' JSON library and many of
+// the popular ones are overly complex. Here I've used 'uPickle'. For an
+// interesting read, see:
+// https://www.lihaoyi.com/post/uJsonfastflexibleandintuitiveJSONforScala.html.
 case class PrismVPC(
     vpcId: String,
     accountId: String,
-    isDefault: Boolean,
+    default: Boolean,
     subnets: List[PrismSubnet]
 )
 
+// Common to most JSON libraries is the use of macros to support JSON
+// (de)serialisation.
 object PrismVPC {
   implicit val rw: RW[PrismVPC] = macroRW
 }
@@ -53,19 +60,25 @@ case class AccountInfo(
     accountNumber: String,
     accountName: String,
     stack: String,
+    // Option is used for things that may or may not exist - 'Some' and 'None'.
     bucketForArtifact: Option[String],
     bucketForPrivateConfig: Option[String],
     logging: Option[Logging],
     vpc: List[PrismVPC]
 )
 
+// Scala doesn't support 'free-floating' functions; everything has to live in a
+// class. Fortunately, it does have `object` which denotes a singleton object.
+// This is great for acting as a namespace for 'pure' functions (technically
+// they are 'methods'). Most of your methods should be defined in this way. And
+// it worth avoiding (non-case) classes unless you really need mutable state.
 object AccountInfo {
   def asTypescriptTemplate(info: AccountInfo): String = {
     val camelCaseName = StringOps.hyphenToCamel(info.accountName)
     val primaryVpc = info.vpc.find(vpc => {
       val public = vpc.subnets.filter(_.isPublic)
       val privat = vpc.subnets.filter(!_.isPublic)
-      public.length == 3 && privat.length == 3 && !vpc.isDefault
+      public.length == 3 && privat.length == 3 && !vpc.default
     })
 
     val vpcPart = primaryVpc match {
@@ -75,6 +88,7 @@ object AccountInfo {
         val privat =
           vpc.subnets.filter(!_.isPublic).map(subnet => subnet.subnetId)
 
+        // Scala string interpolation is great here!
         s"""vpc: {
            |  primary: {
            |    privateSubnets: ${privat.mkString("['", "', '", "']")}
@@ -104,6 +118,11 @@ object AccountInfo {
   }
 }
 
+// The trait is overkill here but it allows for easier testing if that was
+// required - because we can substitute a stub when writing our tests to avoid
+// network calls. See: https://martinfowler.com/articles/mocksArentStubs.html. I
+// recommend avoiding mocks and using 'fakes' and 'stubs' whenever possible in
+// tests!
 trait PrismLike {
   type AccountID = String
 
@@ -111,6 +130,9 @@ trait PrismLike {
   def getVpcs(): Map[AccountID, List[PrismVPC]]
 }
 
+// I've used 'OkHttpClient' here for HTTP requests. A bit like for JSON, there
+// isn't a standard Scala library here unfortunately. OkHttpClient is a
+// reasonable choice though and fairly easy to use.
 case class Prism(client: OkHttpClient) extends PrismLike {
   override def getAccounts(): List[PrismAccount] = {
     val url = "https://prism.gutools.co.uk/sources/accounts"
@@ -134,14 +156,10 @@ case class Prism(client: OkHttpClient) extends PrismLike {
   }
 }
 
+// Again we use 'object' to house helper functions here.
 object StringOps {
   def hyphenToCamel(name: String): String = {
-    "-([a-z\\d])".r.replaceAllIn(
-      name,
-      { m =>
-        m.group(1).toUpperCase()
-      }
-    )
+    name.split("-").map(_.capitalize).mkString
   }
 
   def indent(str: String, spaces: Int): String = {
@@ -157,13 +175,19 @@ object Main {
     val accounts = prism.getAccounts()
     val vpcs = prism.getVpcs()
 
-    val accountsToMigate = Set("deploy-tools")
+    val accountsToMigate = Set("deploy-tools") // subset to illustrate
 
     val accountInfos = accounts
       .filter(account => accountsToMigate(account.accountName))
       .map(account =>
         AccountInfo(
-          asT
+          accountNumber = account.accountNumber,
+          accountName = StringOps.hyphenToCamel(account.accountName),
+          stack = account.accountName,
+          bucketForArtifact = Some("TODO"),
+          bucketForPrivateConfig = Some("TODO"),
+          logging = Some(Logging(streamName = "TODO")),
+          vpc = vpcs.getOrElse(account.accountNumber, Nil)
         )
       )
 
